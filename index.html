@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>Fotobox</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Creepster&family=Fredoka:wght@500;700&display=swap">
 <style>
   :root { --bg:#111214; --fg:#f4f2ee; --muted:#9a9890; --accent:#ffb020; --panel:#1d1f23; color-scheme:dark }
   * { box-sizing:border-box }
@@ -48,7 +49,21 @@
   <div class="row">
     <button class="primary" id="pickBox">iPad: Fotobox</button>
     <button class="primary" id="pickCam">iPhone: Kamera</button>
+    <button id="pickArchive">Archiv (Mac / Android)</button>
   </div>
+</section>
+
+<!-- MacBook (Chrome): speichert alles automatisch in einen Ordner -->
+<section class="screen" id="archive" hidden>
+  <h1>Archiv</h1>
+  <p id="archHint">Wähle einen Ordner. Jeder Fotostreifen und jedes Einzelfoto landet dort automatisch.</p>
+  <button class="primary" id="archFolder">Ordner wählen</button>
+  <div class="row" id="archJoin" hidden>
+    <input id="archCode" inputmode="numeric" maxlength="4" autocomplete="off" aria-label="Code vom iPad">
+    <button class="primary" id="archConnect">Verbinden</button>
+  </div>
+  <p id="archStatus"></p>
+  <img id="archLast" alt="Zuletzt gespeicherter Fotostreifen" hidden style="max-height:50vh; max-width:100%; border-radius:8px">
 </section>
 
 <!-- iPad -->
@@ -66,6 +81,7 @@
   <div class="status" id="boxStatus" hidden></div>
   <div class="bottom" id="boxShootBar" hidden><button class="shutter" id="boxShoot" aria-label="Fotoserie starten"></button></div>
   <div class="gallery" id="gallery" hidden>
+    <button id="archState" disabled>Mac: –</button>
     <button id="saveAll">Galerie sichern (0)</button>
     <button id="clearAll">Leeren</button>
   </div>
@@ -92,7 +108,8 @@ const PREFIX = 'fotobox-nf-';     // ponytail: öffentlicher PeerJS-Server, eige
 const COUNTDOWN = 3;              // Sekunden vor jedem Foto
 const SHOTS = 4;                  // Fotos pro Streifen
 const SHOW_STRIP = 8;             // Sekunden, die der fertige Streifen angezeigt wird
-const STRIP_TEXT = 'Fotobox';     // Text unten auf dem Streifen
+const STRIP_TITLE = 'Rasmus wird 25';
+const STRIP_SUB = 'Halloween-Geburtstag';
 const JPEG_QUALITY = 0.92;
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -120,27 +137,69 @@ async function loadImage(blob) {
   return img;
 }
 
-// Klassischer Fotostreifen: Fotos untereinander, 4:3 mittig zugeschnitten, weißer Rand, Text + Datum unten
+// Spinnennetz in eine Ecke: Speichen + Bögen. (x,y) = Ecke, dx/dy = Richtung (+1/-1)
+function web(g, x, y, dx, dy, r) {
+  g.save(); g.translate(x, y); g.scale(dx, dy);
+  g.strokeStyle = 'rgba(255,255,255,.35)'; g.lineWidth = 3;
+  const spokes = 5;
+  for (let i = 0; i <= spokes; i++) {
+    const a = i / spokes * Math.PI / 2;
+    g.beginPath(); g.moveTo(0, 0); g.lineTo(Math.cos(a) * r, Math.sin(a) * r); g.stroke();
+  }
+  for (let ring = 1; ring <= 4; ring++) {
+    const rr = r * ring / 4.5;
+    g.beginPath();
+    for (let i = 0; i <= spokes; i++) {
+      const a = i / spokes * Math.PI / 2, px = Math.cos(a) * rr, py = Math.sin(a) * rr;
+      if (i === 0) g.moveTo(px, py);
+      else { const m = (i - .5) / spokes * Math.PI / 2; g.quadraticCurveTo(Math.cos(m) * rr * .8, Math.sin(m) * rr * .8, px, py); }
+    }
+    g.stroke();
+  }
+  g.restore();
+}
+
+// Halloween-Karte 2x2: dunkles Lila, Kürbis-Orange, Titel in Creepster, Spinnennetze in den Ecken
 async function buildStrip(blobs) {
-  const W = 1200, M = 60, GAP = 40, CW = W - 2 * M, CH = Math.round(CW * 3 / 4), FOOT = 240;
-  const c = document.createElement('canvas');
-  c.width = W; c.height = M + blobs.length * CH + (blobs.length - 1) * GAP + FOOT;
+  const W = 1800, M = 110, GAP = 70, HEAD = 350, FOOT = 190;
+  const CW = (W - 2 * M - GAP) / 2, CH = Math.round(CW * 3 / 4);
+  const H = HEAD + 2 * CH + GAP + FOOT;
+  const ORANGE = '#ff7a1a', PURPLE = '#1b1024', LILAC = '#b79bd8';
+  await Promise.all([document.fonts.load('140px Creepster'), document.fonts.load('700 52px Fredoka')]).catch(() => {});
+
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
   const g = c.getContext('2d');
-  g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+  const bg = g.createRadialGradient(W / 2, H * .45, 100, W / 2, H * .45, W);
+  bg.addColorStop(0, '#2c1a3d'); bg.addColorStop(1, PURPLE);
+  g.fillStyle = bg; g.fillRect(0, 0, W, H);
+  web(g, 0, 0, 1, 1, 400); web(g, W, 0, -1, 1, 400);
+
+  // Kopf
+  g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+  g.fillStyle = ORANGE; g.shadowColor = 'rgba(255,122,26,.55)'; g.shadowBlur = 40;
+  g.font = '150px Creepster, Impact, sans-serif'; g.fillText(STRIP_TITLE, W / 2, 205);
+  g.shadowBlur = 0;
+  g.fillStyle = LILAC; g.font = '700 50px Fredoka, -apple-system, sans-serif';
+  g.fillText(STRIP_SUB.toUpperCase().split('').join(String.fromCharCode(8202)), W / 2, 280);
+  g.font = '90px serif'; g.fillText('🦇', 230, 170); g.fillText('🦇', W - 230, 120);
+
+  // Fotos 2x2, je 4:3 mittig zugeschnitten
   for (let i = 0; i < blobs.length; i++) {
     const img = await loadImage(blobs[i]);
+    const x = M + (i % 2) * (CW + GAP), y = HEAD + Math.floor(i / 2) * (CH + GAP);
     const s = Math.max(CW / img.width, CH / img.height), sw = CW / s, sh = CH / s;
-    g.drawImage(img, (img.width - sw) / 2, (img.height - sh) / 2, sw, sh, M, M + i * (CH + GAP), CW, CH);
+    g.drawImage(img, (img.width - sw) / 2, (img.height - sh) / 2, sw, sh, x, y, CW, CH);
   }
-  const y = c.height - FOOT / 2;
-  g.fillStyle = '#222'; g.textAlign = 'center';
-  g.font = '700 72px -apple-system, system-ui, sans-serif'; g.fillText(STRIP_TEXT, W / 2, y);
-  g.font = '40px -apple-system, system-ui, sans-serif'; g.fillStyle = '#777';
-  g.fillText(new Date().toLocaleDateString('de-DE'), W / 2, y + 60);
+
+  // Fuß
+  const fy = H - FOOT / 2 + 20;
+  g.font = '80px serif'; g.fillText('🎃', M + 50, fy + 5); g.fillText('🎃', W - M - 50, fy + 5);
+  g.fillStyle = LILAC; g.font = '500 44px Fredoka, -apple-system, sans-serif';
+  g.fillText(new Date().toLocaleDateString('de-DE', { day: 'numeric', month: 'long', year: 'numeric' }), W / 2, fy);
   return new Promise(r => c.toBlob(r, 'image/jpeg', JPEG_QUALITY));
 }
 
-function show(id) { for (const s of ['start', 'box', 'cam']) $(s).hidden = s !== id; }
+function show(id) { for (const s of ['start', 'box', 'cam', 'archive']) $(s).hidden = s !== id; }
 function status(el, text) { el.textContent = text; el.hidden = !text; }
 
 async function keepAwake() {
@@ -153,7 +212,7 @@ function startBox() {
   show('box'); keepAwake();
   const code = String(Math.floor(1000 + Math.random() * 9000));
   const peer = new Peer(PREFIX + code);
-  let conn = null, busy = false, onPhoto = null;
+  let conn = null, archive = null, busy = false, onPhoto = null;
   refreshGallery();
 
   peer.on('open', () => { $('boxCode').textContent = code; $('boxWaitStatus').textContent = 'Warte auf iPhone …'; });
@@ -163,6 +222,13 @@ function startBox() {
   });
 
   peer.on('connection', c => {
+    if (c.metadata?.role === 'archiv') {
+      archive?.close(); archive = c;
+      const st = on => $('archState').textContent = on ? 'Mac ✓' : 'Mac: –';
+      c.on('open', () => st(true));
+      c.on('close', () => { if (archive === c) { archive = null; st(false); } });
+      return;
+    }
     conn?.close(); conn = c;
     c.on('data', msg => {
       if (msg.t === 'trigger') shoot();
@@ -205,6 +271,11 @@ function startBox() {
       const strip = await buildStrip(photos);
       await store.add(strip);
       await refreshGallery();
+      if (archive?.open) {
+        const stamp = new Date().toLocaleString('sv-SE').replace(' ', '_').replaceAll(':', '-');  // 2026-10-31_21-05-33
+        archive.send({ t: 'file', name: `${stamp}_streifen.jpg`, buf: await strip.arrayBuffer() });
+        for (const [i, p] of photos.entries()) archive.send({ t: 'file', name: `${stamp}_foto${i + 1}.jpg`, buf: await p.arrayBuffer() });
+      }
       const img = $('photo');
       img.src = URL.createObjectURL(strip); img.hidden = false;
       status($('boxStatus'), 'Gespeichert ✓');
@@ -294,13 +365,65 @@ async function startCam() {
   }
 }
 
+// ---------- MacBook: Archiv, schreibt empfangene Dateien direkt in einen Ordner (nur Chrome/Edge) ----------
+function startArchive() {
+  show('archive');
+  let dir = null, saved = 0;
+  // ponytail: ohne Ordnerauswahl (Android, Safari) als normale Downloads speichern → Download-Ordner
+  if (!window.showDirectoryPicker) {
+    $('archHint').textContent = 'Jede Datei wird automatisch in den Download-Ordner geladen. Fragt der Browser nach „mehrere Downloads erlauben“, bitte zulassen.';
+    $('archFolder').hidden = true; $('archJoin').hidden = false;
+  }
+  const where = () => dir ? `„${dir.name}“` : 'Downloads';
+  async function save(name, buf) {
+    if (dir) {
+      const w = await (await dir.getFileHandle(name, { create: true })).createWritable();
+      await w.write(buf); await w.close();
+    } else {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([buf], { type: 'image/jpeg' })); a.download = name; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    }
+  }
+  $('archFolder').onclick = async () => {
+    try { dir = await showDirectoryPicker({ mode: 'readwrite', id: 'fotobox' }); } catch { return; }
+    $('archStatus').textContent = 'Ordner: ' + dir.name;
+    $('archJoin').hidden = false; $('archCode').focus();
+  };
+  $('archConnect').onclick = () => {
+    const code = $('archCode').value.trim();
+    if (!/^\d{4}$/.test(code)) return $('archStatus').textContent = 'Bitte den 4-stelligen Code vom iPad eingeben.';
+    const peer = new Peer();
+    peer.on('error', e => $('archStatus').textContent = 'Fehler: ' + e.type + (e.type === 'peer-unavailable' ? ' (Code falsch?)' : ''));
+    peer.on('open', () => {
+      const conn = peer.connect(PREFIX + code, { reliable: true, metadata: { role: 'archiv' } });
+      conn.on('open', () => {
+        $('archJoin').hidden = true; $('archFolder').hidden = true; keepAwake();
+        $('archStatus').textContent = `Verbunden mit Fotobox ${code}. Speichere nach ${where()} …`;
+      });
+      conn.on('data', async msg => {
+        if (msg.t !== 'file') return;
+        await save(msg.name, msg.buf);
+        $('archStatus').textContent = `${++saved} Dateien gespeichert in ${where()}. Zuletzt: ${msg.name}`;
+        if (msg.name.endsWith('_streifen.jpg')) {
+          const img = $('archLast'); if (img.src) URL.revokeObjectURL(img.src);
+          img.src = URL.createObjectURL(new Blob([msg.buf], { type: 'image/jpeg' })); img.hidden = false;
+        }
+      });
+      conn.on('close', () => $('archStatus').textContent = `Verbindung getrennt (${saved} Dateien gespeichert). Seite neu laden zum erneuten Verbinden.`);
+    });
+  };
+}
+
 function flash(el) { el.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => el.classList.remove('on'))); }
 
 $('pickBox').onclick = startBox;
 $('pickCam').onclick = startCam;
+$('pickArchive').onclick = startArchive;
 const role = new URLSearchParams(location.search).get('rolle');
 if (role === 'box') startBox();
 if (role === 'kamera') startCam();
+if (role === 'archiv') startArchive();
 </script>
 </body>
 </html>
