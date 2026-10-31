@@ -31,6 +31,9 @@
     background:rgba(0,0,0,.55); padding:6px 14px; border-radius:99px; font-size:.9rem }
   #countdown { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
     font-size:min(40vw, 40vh); font-weight:800; color:#fff; text-shadow:0 4px 40px rgba(0,0,0,.6); pointer-events:none }
+  .gallery { position:absolute; top:max(12px, env(safe-area-inset-top)); right:max(12px, env(safe-area-inset-right)); display:flex; gap:8px }
+  .gallery button { padding:10px 16px; font-size:.9rem; background:rgba(0,0,0,.55) }
+  #shotNo { position:absolute; bottom:22%; left:0; right:0; text-align:center; font-size:2rem; font-weight:700; color:#fff; text-shadow:0 2px 20px rgba(0,0,0,.7) }
   #flash, #camFlash { position:absolute; inset:0; background:#fff; opacity:0; pointer-events:none; transition:opacity .4s }
   #flash.on, #camFlash.on { opacity:1; transition:none }
   [hidden] { display:none !important }
@@ -58,12 +61,13 @@
   <video id="boxVideo" playsinline autoplay muted hidden></video>
   <img id="photo" alt="Aufgenommenes Foto" hidden>
   <div id="countdown" hidden></div>
+  <div id="shotNo" hidden></div>
   <div id="flash"></div>
   <div class="status" id="boxStatus" hidden></div>
-  <div class="bottom" id="boxShootBar" hidden><button class="shutter" id="boxShoot" aria-label="Auslösen"></button></div>
-  <div class="bottom" id="boxPhotoBar" hidden>
-    <button class="primary" id="sharePhoto">Sichern / Teilen</button>
-    <button id="again">Nochmal</button>
+  <div class="bottom" id="boxShootBar" hidden><button class="shutter" id="boxShoot" aria-label="Fotoserie starten"></button></div>
+  <div class="gallery" id="gallery" hidden>
+    <button id="saveAll">Galerie sichern (0)</button>
+    <button id="clearAll">Leeren</button>
   </div>
 </section>
 
@@ -85,8 +89,56 @@
 <script>
 const $ = id => document.getElementById(id);
 const PREFIX = 'fotobox-nf-';     // ponytail: öffentlicher PeerJS-Server, eigener Server erst wenn der mal hakt
-const COUNTDOWN = 3;              // Sekunden
+const COUNTDOWN = 3;              // Sekunden vor jedem Foto
+const SHOTS = 4;                  // Fotos pro Streifen
+const SHOW_STRIP = 8;             // Sekunden, die der fertige Streifen angezeigt wird
+const STRIP_TEXT = 'Fotobox';     // Text unten auf dem Streifen
 const JPEG_QUALITY = 0.92;
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Streifen bleiben im iPad-Browser (IndexedDB), bis sie gesammelt gesichert werden.
+// ponytail: Safari kann nicht selbst in die Fotos-App speichern, daher Sammeln + einmal "Bilder sichern"
+const store = {
+  db: new Promise((res, rej) => {
+    const r = indexedDB.open('fotobox', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('strips', { autoIncrement: true });
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  }),
+  async run(mode, fn) {
+    const tx = (await this.db).transaction('strips', mode), req = fn(tx.objectStore('strips'));
+    return new Promise((res, rej) => { tx.oncomplete = () => res(req.result); tx.onerror = () => rej(tx.error); });
+  },
+  add(blob) { return this.run('readwrite', s => s.add(blob)); },
+  all() { return this.run('readonly', s => s.getAll()); },
+  clear() { return this.run('readwrite', s => s.clear()); },
+};
+
+async function loadImage(blob) {
+  const img = new Image(); img.src = URL.createObjectURL(blob);
+  await img.decode(); URL.revokeObjectURL(img.src);
+  return img;
+}
+
+// Klassischer Fotostreifen: Fotos untereinander, 4:3 mittig zugeschnitten, weißer Rand, Text + Datum unten
+async function buildStrip(blobs) {
+  const W = 1200, M = 60, GAP = 40, CW = W - 2 * M, CH = Math.round(CW * 3 / 4), FOOT = 240;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = M + blobs.length * CH + (blobs.length - 1) * GAP + FOOT;
+  const g = c.getContext('2d');
+  g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+  for (let i = 0; i < blobs.length; i++) {
+    const img = await loadImage(blobs[i]);
+    const s = Math.max(CW / img.width, CH / img.height), sw = CW / s, sh = CH / s;
+    g.drawImage(img, (img.width - sw) / 2, (img.height - sh) / 2, sw, sh, M, M + i * (CH + GAP), CW, CH);
+  }
+  const y = c.height - FOOT / 2;
+  g.fillStyle = '#222'; g.textAlign = 'center';
+  g.font = '700 72px -apple-system, system-ui, sans-serif'; g.fillText(STRIP_TEXT, W / 2, y);
+  g.font = '40px -apple-system, system-ui, sans-serif'; g.fillStyle = '#777';
+  g.fillText(new Date().toLocaleDateString('de-DE'), W / 2, y + 60);
+  return new Promise(r => c.toBlob(r, 'image/jpeg', JPEG_QUALITY));
+}
 
 function show(id) { for (const s of ['start', 'box', 'cam']) $(s).hidden = s !== id; }
 function status(el, text) { el.textContent = text; el.hidden = !text; }
@@ -101,7 +153,8 @@ function startBox() {
   show('box'); keepAwake();
   const code = String(Math.floor(1000 + Math.random() * 9000));
   const peer = new Peer(PREFIX + code);
-  let conn = null, busy = false, lastBlob = null;
+  let conn = null, busy = false, onPhoto = null;
+  refreshGallery();
 
   peer.on('open', () => { $('boxCode').textContent = code; $('boxWaitStatus').textContent = 'Warte auf iPhone …'; });
   peer.on('error', e => {
@@ -113,7 +166,7 @@ function startBox() {
     conn?.close(); conn = c;
     c.on('data', msg => {
       if (msg.t === 'trigger') shoot();
-      if (msg.t === 'photo') showPhoto(new Blob([msg.buf], { type: 'image/jpeg' }));
+      if (msg.t === 'photo') onPhoto?.(new Blob([msg.buf], { type: 'image/jpeg' }));
     });
     c.on('close', () => { status($('boxStatus'), 'iPhone getrennt. Warte auf neue Verbindung …'); });
   });
@@ -127,39 +180,67 @@ function startBox() {
     });
   });
 
-  async function shoot() {
-    if (busy || !conn?.open) return;
-    busy = true; $('boxShootBar').hidden = true;
-    const cd = $('countdown'); cd.hidden = false;
-    for (let i = COUNTDOWN; i > 0; i--) { cd.textContent = i; await new Promise(r => setTimeout(r, 1000)); }
-    cd.hidden = true;
-    flash($('flash'));
-    conn.send({ t: 'shoot' });
-    status($('boxStatus'), 'Foto wird übertragen …');
+  function takePhoto() {
+    return new Promise((res, rej) => {
+      const t = setTimeout(() => { onPhoto = null; rej(new Error('Kein Foto vom iPhone erhalten')); }, 20000);
+      onPhoto = blob => { clearTimeout(t); onPhoto = null; res(blob); };
+      conn.send({ t: 'shoot' });
+    });
   }
 
-  function showPhoto(blob) {
-    lastBlob = blob;
-    const img = $('photo');
-    if (img.src) URL.revokeObjectURL(img.src);
-    img.src = URL.createObjectURL(blob); img.hidden = false;
-    status($('boxStatus'), '');
-    $('boxPhotoBar').hidden = false;
+  // Serie: SHOTS Fotos mit Countdown, Streifen bauen, speichern, anzeigen, von vorne
+  async function shoot() {
+    if (busy || !conn?.open) return;
+    busy = true; $('boxShootBar').hidden = true; $('gallery').hidden = true;
+    const cd = $('countdown'), no = $('shotNo'), photos = [];
+    try {
+      for (let n = 1; n <= SHOTS; n++) {
+        no.textContent = `Foto ${n} von ${SHOTS}`; no.hidden = false; cd.hidden = false;
+        for (let i = COUNTDOWN; i > 0; i--) { cd.textContent = i; await sleep(1000); }
+        cd.hidden = true; flash($('flash'));
+        photos.push(await takePhoto());   // wartet auf die Übertragung, dann nächster Countdown
+      }
+      no.hidden = true;
+      status($('boxStatus'), 'Fotostreifen wird erstellt …');
+      const strip = await buildStrip(photos);
+      await store.add(strip);
+      await refreshGallery();
+      const img = $('photo');
+      img.src = URL.createObjectURL(strip); img.hidden = false;
+      status($('boxStatus'), 'Gespeichert ✓');
+      await sleep(SHOW_STRIP * 1000);
+      URL.revokeObjectURL(img.src);
+    } catch (e) {
+      status($('boxStatus'), e.message + '. Nochmal auslösen.');
+      await sleep(3000);
+    }
+    reset();
   }
 
   function reset() {
-    busy = false; $('photo').hidden = true; $('boxPhotoBar').hidden = true;
-    $('boxShootBar').hidden = false; status($('boxStatus'), '');
+    busy = false; $('photo').hidden = true; $('countdown').hidden = true; $('shotNo').hidden = true;
+    $('boxShootBar').hidden = false; $('gallery').hidden = false; status($('boxStatus'), '');
   }
 
   $('boxShoot').onclick = shoot;
-  $('again').onclick = reset;
-  $('sharePhoto').onclick = async () => {
-    const file = new File([lastBlob], 'fotobox-' + Date.now() + '.jpg', { type: 'image/jpeg' });
-    try { await navigator.share({ files: [file] }); }
-    catch (e) { if (e.name !== 'AbortError') status($('boxStatus'), 'Teilen geht hier nicht. Foto lange antippen zum Sichern.'); }
-  };
 }
+
+async function refreshGallery() {
+  const n = (await store.all()).length;
+  $('saveAll').textContent = `Galerie sichern (${n})`;
+  $('saveAll').disabled = $('clearAll').disabled = n === 0;
+}
+
+// Alle Streifen auf einmal ins Teilen-Menü → dort "Bilder sichern" landet alles in Fotos
+$('saveAll').onclick = async () => {
+  const files = (await store.all()).map((b, i) => new File([b], `fotostreifen-${i + 1}.jpg`, { type: 'image/jpeg' }));
+  try { await navigator.share({ files }); }
+  catch (e) { if (e.name !== 'AbortError') status($('boxStatus'), 'Teilen geht in diesem Browser nicht.'); }
+};
+$('clearAll').onclick = async () => {
+  if (!confirm('Alle Streifen auf dem iPad löschen? Vorher sichern!')) return;
+  await store.clear(); refreshGallery();
+};
 
 // ---------- iPhone: Kamera, Stream senden, Foto aufnehmen ----------
 async function startCam() {
