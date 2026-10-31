@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Fotobox</title>
+<style>
+  :root { --bg:#111214; --fg:#f4f2ee; --muted:#9a9890; --accent:#ffb020; --panel:#1d1f23; color-scheme:dark }
+  * { box-sizing:border-box }
+  html, body { height:100%; margin:0; background:var(--bg); color:var(--fg);
+    font:16px/1.4 -apple-system, system-ui, sans-serif; -webkit-user-select:none; user-select:none }
+  .screen { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:20px;
+    padding:max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)) }
+  h1 { margin:0; font-size:2rem }
+  p { margin:0; color:var(--muted); text-align:center; max-width:32rem }
+  button { font:inherit; font-weight:600; border:0; border-radius:14px; padding:16px 28px; background:var(--panel); color:var(--fg); cursor:pointer }
+  button.primary { background:var(--accent); color:#111 }
+  button:focus-visible, input:focus-visible { outline:3px solid var(--accent); outline-offset:3px }
+  input { font:inherit; font-size:2.5rem; letter-spacing:.3em; text-align:center; width:9ch; padding:10px; border-radius:14px;
+    border:2px solid var(--panel); background:var(--panel); color:var(--fg) }
+  .row { display:flex; gap:12px; flex-wrap:wrap; justify-content:center }
+  .code { font-size:4rem; font-weight:700; letter-spacing:.2em; color:var(--accent); font-variant-numeric:tabular-nums }
+  video, #photo { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; background:#000 }
+  /* ponytail: Vorschau gespiegelt wie ein Spiegel, das Foto selbst bleibt ungespiegelt */
+  #boxVideo { transform:scaleX(-1) }
+  .bottom { position:absolute; left:0; right:0; bottom:0; display:flex; justify-content:center; gap:12px;
+    padding:16px max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)) }
+  .shutter { width:96px; height:96px; border-radius:50%; padding:0; background:var(--fg); box-shadow:0 0 0 6px rgba(0,0,0,.4), 0 0 0 10px var(--fg) }
+  .status { position:absolute; top:max(12px, env(safe-area-inset-top)); left:50%; transform:translateX(-50%);
+    background:rgba(0,0,0,.55); padding:6px 14px; border-radius:99px; font-size:.9rem }
+  #countdown { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    font-size:min(40vw, 40vh); font-weight:800; color:#fff; text-shadow:0 4px 40px rgba(0,0,0,.6); pointer-events:none }
+  #flash, #camFlash { position:absolute; inset:0; background:#fff; opacity:0; pointer-events:none; transition:opacity .4s }
+  #flash.on, #camFlash.on { opacity:1; transition:none }
+  [hidden] { display:none !important }
+</style>
+</head>
+<body>
+
+<!-- Rolle wählen -->
+<section class="screen" id="start">
+  <h1>Fotobox</h1>
+  <p>Auf dem iPad „Fotobox“ wählen, auf dem iPhone „Kamera“. Beide Geräte brauchen Internet für die Kopplung.</p>
+  <div class="row">
+    <button class="primary" id="pickBox">iPad: Fotobox</button>
+    <button class="primary" id="pickCam">iPhone: Kamera</button>
+  </div>
+</section>
+
+<!-- iPad -->
+<section class="screen" id="box" hidden>
+  <div id="boxWait" class="screen">
+    <p>Diesen Code auf dem iPhone eingeben:</p>
+    <div class="code" id="boxCode">····</div>
+    <p id="boxWaitStatus">Verbinde mit Server …</p>
+  </div>
+  <video id="boxVideo" playsinline autoplay muted hidden></video>
+  <img id="photo" alt="Aufgenommenes Foto" hidden>
+  <div id="countdown" hidden></div>
+  <div id="flash"></div>
+  <div class="status" id="boxStatus" hidden></div>
+  <div class="bottom" id="boxShootBar" hidden><button class="shutter" id="boxShoot" aria-label="Auslösen"></button></div>
+  <div class="bottom" id="boxPhotoBar" hidden>
+    <button class="primary" id="sharePhoto">Sichern / Teilen</button>
+    <button id="again">Nochmal</button>
+  </div>
+</section>
+
+<!-- iPhone -->
+<section class="screen" id="cam" hidden>
+  <div id="camJoin" class="screen">
+    <p>Code vom iPad eingeben:</p>
+    <input id="camCode" inputmode="numeric" maxlength="4" autocomplete="off" aria-label="Code vom iPad">
+    <button class="primary" id="camConnect">Verbinden</button>
+    <p id="camJoinStatus"></p>
+  </div>
+  <video id="camVideo" playsinline autoplay muted hidden></video>
+  <div id="camFlash"></div>
+  <div class="status" id="camStatus" hidden></div>
+  <div class="bottom" id="camShootBar" hidden><button class="shutter" id="camShoot" aria-label="Auslösen"></button></div>
+</section>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const PREFIX = 'fotobox-nf-';     // ponytail: öffentlicher PeerJS-Server, eigener Server erst wenn der mal hakt
+const COUNTDOWN = 3;              // Sekunden
+const JPEG_QUALITY = 0.92;
+
+function show(id) { for (const s of ['start', 'box', 'cam']) $(s).hidden = s !== id; }
+function status(el, text) { el.textContent = text; el.hidden = !text; }
+
+async function keepAwake() {
+  try { await navigator.wakeLock?.request('screen'); } catch {}
+}
+document.addEventListener('visibilitychange', () => { if (!document.hidden) keepAwake(); });
+
+// ---------- iPad: Vorschau, Countdown, Foto anzeigen ----------
+function startBox() {
+  show('box'); keepAwake();
+  const code = String(Math.floor(1000 + Math.random() * 9000));
+  const peer = new Peer(PREFIX + code);
+  let conn = null, busy = false, lastBlob = null;
+
+  peer.on('open', () => { $('boxCode').textContent = code; $('boxWaitStatus').textContent = 'Warte auf iPhone …'; });
+  peer.on('error', e => {
+    if (e.type === 'unavailable-id') { peer.destroy(); return startBox(); }  // Code schon vergeben: neuen ziehen
+    $('boxWaitStatus').textContent = 'Fehler: ' + e.type + '. Seite neu laden.';
+  });
+
+  peer.on('connection', c => {
+    conn?.close(); conn = c;
+    c.on('data', msg => {
+      if (msg.t === 'trigger') shoot();
+      if (msg.t === 'photo') showPhoto(new Blob([msg.buf], { type: 'image/jpeg' }));
+    });
+    c.on('close', () => { status($('boxStatus'), 'iPhone getrennt. Warte auf neue Verbindung …'); });
+  });
+
+  peer.on('call', call => {
+    call.answer();
+    call.on('stream', s => {
+      $('boxVideo').srcObject = s; $('boxVideo').play().catch(() => {});
+      $('boxWait').hidden = true; $('boxVideo').hidden = false;
+      reset();
+    });
+  });
+
+  async function shoot() {
+    if (busy || !conn?.open) return;
+    busy = true; $('boxShootBar').hidden = true;
+    const cd = $('countdown'); cd.hidden = false;
+    for (let i = COUNTDOWN; i > 0; i--) { cd.textContent = i; await new Promise(r => setTimeout(r, 1000)); }
+    cd.hidden = true;
+    flash($('flash'));
+    conn.send({ t: 'shoot' });
+    status($('boxStatus'), 'Foto wird übertragen …');
+  }
+
+  function showPhoto(blob) {
+    lastBlob = blob;
+    const img = $('photo');
+    if (img.src) URL.revokeObjectURL(img.src);
+    img.src = URL.createObjectURL(blob); img.hidden = false;
+    status($('boxStatus'), '');
+    $('boxPhotoBar').hidden = false;
+  }
+
+  function reset() {
+    busy = false; $('photo').hidden = true; $('boxPhotoBar').hidden = true;
+    $('boxShootBar').hidden = false; status($('boxStatus'), '');
+  }
+
+  $('boxShoot').onclick = shoot;
+  $('again').onclick = reset;
+  $('sharePhoto').onclick = async () => {
+    const file = new File([lastBlob], 'fotobox-' + Date.now() + '.jpg', { type: 'image/jpeg' });
+    try { await navigator.share({ files: [file] }); }
+    catch (e) { if (e.name !== 'AbortError') status($('boxStatus'), 'Teilen geht hier nicht. Foto lange antippen zum Sichern.'); }
+  };
+}
+
+// ---------- iPhone: Kamera, Stream senden, Foto aufnehmen ----------
+async function startCam() {
+  show('cam');
+  $('camCode').focus();
+  let stream;
+
+  $('camConnect').onclick = async () => {
+    const code = $('camCode').value.trim();
+    if (!/^\d{4}$/.test(code)) return $('camJoinStatus').textContent = 'Bitte den 4-stelligen Code vom iPad eingeben.';
+    $('camJoinStatus').textContent = 'Starte Kamera …';
+    try {
+      stream ??= await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        // ponytail: Rückkamera mit max. 4K; das Foto ist ein Videobild, nicht die volle Sensorauflösung
+        video: { facingMode: 'environment', width: { ideal: 3840 }, height: { ideal: 2160 } }
+      });
+    } catch (e) {
+      return $('camJoinStatus').textContent = 'Kein Kamerazugriff (' + e.name + '). In Safari erlauben und neu laden.';
+    }
+    $('camVideo').srcObject = stream;
+    $('camJoinStatus').textContent = 'Verbinde mit iPad …';
+
+    const peer = new Peer();
+    peer.on('error', e => { $('camJoinStatus').textContent = 'Fehler: ' + e.type + (e.type === 'peer-unavailable' ? ' (Code falsch?)' : ''); });
+    peer.on('open', () => {
+      const target = PREFIX + code;
+      const conn = peer.connect(target, { reliable: true });
+      conn.on('open', () => {
+        peer.call(target, stream);
+        keepAwake();
+        $('camJoin').hidden = true; $('camVideo').hidden = false; $('camShootBar').hidden = false;
+        status($('camStatus'), 'Verbunden mit Fotobox ' + code);
+      });
+      conn.on('data', async msg => {
+        if (msg.t !== 'shoot') return;
+        flash($('camFlash'));
+        conn.send({ t: 'photo', buf: await capture() });
+      });
+      conn.on('close', () => status($('camStatus'), 'Verbindung zum iPad getrennt. Seite neu laden.'));
+      $('camShoot').onclick = () => conn.send({ t: 'trigger' });
+    });
+  };
+
+  async function capture() {
+    const v = $('camVideo'), c = document.createElement('canvas');
+    c.width = v.videoWidth; c.height = v.videoHeight;
+    c.getContext('2d').drawImage(v, 0, 0);
+    const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', JPEG_QUALITY));
+    return blob.arrayBuffer();
+  }
+}
+
+function flash(el) { el.classList.add('on'); requestAnimationFrame(() => requestAnimationFrame(() => el.classList.remove('on'))); }
+
+$('pickBox').onclick = startBox;
+$('pickCam').onclick = startCam;
+const role = new URLSearchParams(location.search).get('rolle');
+if (role === 'box') startBox();
+if (role === 'kamera') startCam();
+</script>
+</body>
+</html>
